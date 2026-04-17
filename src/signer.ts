@@ -10,7 +10,7 @@
  * This allows plugging in P12 certs, PKCS#11 smart cards, or WebAuthn.
  */
 
-import { PDFDocument, PDFHexString, PDFName, PDFArray, PDFDict, PDFString } from 'pdf-lib'
+import { PDFDocument, PDFHexString, PDFName, PDFArray, PDFDict, PDFString, PDFNumber } from 'pdf-lib'
 import forge from 'node-forge'
 import { createHash } from 'node:crypto'
 
@@ -82,11 +82,18 @@ export async function signPdf(
   const placeholder = Buffer.alloc(signaturePlaceholderLength).toString('hex')
 
   // Add signature dictionary to the PDF
+  // ByteRange placeholder: 10-digit numbers give enough space for real values later
+  const byteRangePlaceholder = PDFArray.withContext(pdfDoc.context)
+  byteRangePlaceholder.push(PDFNumber.of(0))
+  byteRangePlaceholder.push(PDFNumber.of(9999999999))
+  byteRangePlaceholder.push(PDFNumber.of(9999999999))
+  byteRangePlaceholder.push(PDFNumber.of(9999999999))
+
   const sigDict = pdfDoc.context.obj({
     Type: 'Sig',
     Filter: 'Adobe.PPKLite',
     SubFilter: 'adbe.pkcs7.detached',
-    ByteRange: PDFArray.withContext(pdfDoc.context),
+    ByteRange: byteRangePlaceholder,
     Contents: PDFHexString.of(placeholder),
     Reason: options.reason ? PDFString.of(options.reason) : undefined,
     Location: options.location ? PDFString.of(options.location) : undefined,
@@ -127,7 +134,7 @@ export async function signPdf(
   // Save with placeholder
   const pdfWithPlaceholder = await pdfDoc.save({ useObjectStreams: false })
 
-  // Find the ByteRange — locate the Contents hex string
+  // Step 1: Locate the Contents hex string to compute ByteRange
   const pdfBuffer = Buffer.from(pdfWithPlaceholder)
   const contentsTag = Buffer.from('/Contents <')
   const contentsStart = pdfBuffer.indexOf(contentsTag)
@@ -142,14 +149,24 @@ export async function signPdf(
   // ByteRange: [0, hexStart, hexEnd, pdfBuffer.length - hexEnd]
   const byteRange = [0, hexStart, hexEnd, pdfBuffer.length - hexEnd]
 
-  // Hash the parts outside the signature
+  // Step 2: Patch ByteRange placeholder with real values BEFORE hashing
+  const brPlaceholderRegex = /\/ByteRange\s*\[\s*0\s+9999999999\s+9999999999\s+9999999999\s*\]/
+  const pdfStr = pdfBuffer.toString('latin1')
+  const brMatch = brPlaceholderRegex.exec(pdfStr)
+  if (brMatch) {
+    const byteRangeStr = `/ByteRange [${byteRange[0]} ${byteRange[1]} ${byteRange[2]} ${byteRange[3]}]`
+    const padded = byteRangeStr.padEnd(brMatch[0].length, ' ')
+    Buffer.from(padded, 'latin1').copy(pdfBuffer, brMatch.index)
+  }
+
+  // Step 3: Hash the parts outside the signature Contents
   const hashInput = Buffer.concat([
     pdfBuffer.subarray(byteRange[0], byteRange[0] + byteRange[1]),
     pdfBuffer.subarray(byteRange[2], byteRange[2] + byteRange[3]),
   ])
   const hash = createHash('sha256').update(hashInput).digest()
 
-  // Sign the hash via the callback
+  // Step 4: Sign the hash via the callback
   const pkcs7Signature = await options.signHash(hash)
 
   // Verify the signature fits in the placeholder
@@ -163,7 +180,7 @@ export async function signPdf(
   // Pad the signature hex to fill the placeholder
   const paddedSigHex = sigHex.padEnd(signaturePlaceholderLength * 2, '0')
 
-  // Replace the placeholder with the actual signature
+  // Step 5: Embed signature into the placeholder
   const signedPdf = Buffer.from(pdfBuffer)
   const placeholderHex = Buffer.from(placeholder)
   const placeholderPos = signedPdf.indexOf(placeholderHex, hexStart)
@@ -171,9 +188,6 @@ export async function signPdf(
     throw new Error('Could not locate hex placeholder in PDF')
   }
   Buffer.from(paddedSigHex).copy(signedPdf, placeholderPos)
-
-  // Update ByteRange in the PDF
-  // (For a production implementation, we'd update the ByteRange array in the sig dict)
 
   const sha256 = createHash('sha256').update(signedPdf).digest('hex')
 

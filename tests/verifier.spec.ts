@@ -106,17 +106,13 @@ describe('verifier', () => {
       expect(result.signatures).toHaveLength(1)
     })
 
-    it('reports valid=false because signer does not yet write ByteRange values', async () => {
+    it('reports valid=true with correct ByteRange and valid cert', async () => {
       const result = await verifyPdf(signedPdf)
 
-      // The current signer creates an empty ByteRange array in the PDF.
-      // The verifier cannot compute integrityValid without ByteRange numbers,
-      // so integrityValid stays false, which makes overall valid=false.
-      // This is a known v0.1 limitation (see signer.ts line 176).
-      expect(result.valid).toBe(false)
+      expect(result.valid).toBe(true)
       expect(result.errors).toHaveLength(0)
-      // Certificate itself IS valid (not expired)
       expect(result.signatures[0].certValid).toBe(true)
+      expect(result.signatures[0].integrityValid).toBe(true)
     })
 
     it('accepts Buffer input', async () => {
@@ -177,14 +173,11 @@ describe('verifier', () => {
   })
 
   describe('integrity checking', () => {
-    it('integrityValid is false when ByteRange is not populated (v0.1 limitation)', async () => {
+    it('integrityValid is true when ByteRange is populated', async () => {
       const result = await verifyPdf(signedPdf)
       const sig = result.signatures[0]
 
-      // The signer does not yet write ByteRange values into the PDF,
-      // so the verifier cannot compute integrity. This is expected to
-      // become true once the signer writes ByteRange (see signer.ts line 176).
-      expect(sig.integrityValid).toBe(false)
+      expect(sig.integrityValid).toBe(true)
     })
 
     it('detects tampering when bytes are modified after signing', async () => {
@@ -263,8 +256,7 @@ describe('verifier', () => {
       expect(result.signatureCount).toBe(1)
       expect(result.signatures[0].signerName).toBe('Attestto Verifier Test')
       expect(result.signatures[0].certValid).toBe(true)
-      // valid is false due to integrityValid limitation (no ByteRange)
-      expect(result.valid).toBe(false)
+      expect(result.valid).toBe(true)
     })
 
     it('sign a multi-page PDF and verify finds 1 signature', async () => {
