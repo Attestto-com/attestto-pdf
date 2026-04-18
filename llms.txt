@@ -1,0 +1,60 @@
+# @attestto/pdf
+
+> PDF engine for reading, signing (PAdES-B/T), verifying, and hashing PDF documents with X.509 digital signatures and optional Solana anchoring.
+
+Part of the [Attestto Open](https://attestto.org) ecosystem.
+
+## Install
+
+```bash
+npm install @attestto/pdf
+```
+
+Requires Node >= 20. Optional peer dependencies: `vue` (>= 3.4) for UI components, `pdfjs-dist` (>= 4.0) for rendering.
+
+## What it does
+
+- **Read** -- Load a PDF, extract metadata (title, author, page count), compute SHA-256 hash.
+- **Sign** -- Apply PAdES-B digital signatures using PKCS#7/CMS detached format. Accepts any signing callback (P12, PKCS#11 smart card, WebAuthn, remote HSM). Never holds private keys.
+- **Verify** -- Validate existing PDF signatures: integrity check, certificate validity, ByteRange validation.
+- **Anchor** -- Optional Solana timestamp anchoring (PAdES-T) via user-supplied callback.
+- **Vue components** -- `<PdfViewer>` and `<SignaturePanel>` (import from `@attestto/pdf/vue`).
+
+## Core API
+
+```typescript
+import { loadPdf, hashPdf } from '@attestto/pdf'        // Reader
+import { signPdf, createP12Signer } from '@attestto/pdf' // Signer
+import { verifyPdf } from '@attestto/pdf'                // Verifier
+```
+
+- `loadPdf(bytes)` -- Returns `{ metadata }` with sha256, pageCount, title, author.
+- `hashPdf(bytes)` -- Returns SHA-256 hex string.
+- `signPdf(bytes, options)` -- Signs PDF. Options: `identity` (cert PEM + optional DID), `signHash` callback, `reason`, `location`, `anchor` callback.
+- `createP12Signer(p12, password)` -- Creates a `signHash` callback from a P12/PFX file.
+- `verifyPdf(bytes)` -- Returns `{ valid, signatureCount, signatures[], errors[] }`.
+
+## Source layout
+
+```
+src/
+  index.ts          -- Public exports
+  reader.ts         -- PDF loading, metadata extraction, hashing
+  signer.ts         -- PAdES-B signing, PKCS#7 envelope, anchor integration
+  verifier.ts       -- Signature extraction, integrity + cert validation
+  components/       -- Vue 3 components (PdfViewer, SignaturePanel)
+```
+
+## Key dependencies
+
+- `pdf-lib` -- PDF manipulation
+- `node-forge` -- X.509 certificate parsing, PKCS#7 construction
+
+## Related packages
+
+- [`@attestto/verify`](https://www.npmjs.com/package/@attestto/verify) -- Document verification Web Components
+- [`attestto-trust`](https://github.com/Attestto-com/attestto-trust) -- PKI trust store (CA certificates by country)
+
+## License
+
+Apache-2.0
