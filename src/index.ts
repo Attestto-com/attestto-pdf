@@ -15,7 +15,7 @@
  * const signer = createP12Signer(p12Buffer, 'password')
  * const signed = await signPdf(pdfBytes, {
  *   identity: { certificatePem: cert },
- *   signHash: signer,
+ *   sign: signer,
  * })
  *
  * // Verify

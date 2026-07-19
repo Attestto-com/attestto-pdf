@@ -1,6 +1,6 @@
 {
   "name": "@attestto/pdf",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "PDF engine — read, render, sign (PAdES-B/T/LT), verify, Solana anchor",
   "type": "module",
   "main": "./dist/index.cjs",

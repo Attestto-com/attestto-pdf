@@ -65,7 +65,7 @@ async function signTestPdf(
 ): Promise<Uint8Array> {
   const opts: SignOptions = {
     identity: { certificatePem: certPem },
-    signHash,
+    sign: signHash,
     ...overrides,
   }
   const result = await signPdf(pdfBytes, opts)
@@ -180,29 +180,92 @@ describe('verifier', () => {
       expect(sig.integrityValid).toBe(true)
     })
 
-    it('detects tampering when bytes are modified after signing', async () => {
-      // Create a fresh signed PDF
+    it('detects tampering when bytes within the ByteRange are modified after signing (SOC-18)', async () => {
       const freshSigned = await signTestPdf(pdfBytes, certPem, signHash)
       const tampered = Buffer.from(freshSigned)
 
-      // Modify bytes near the end of the PDF (outside the signature)
-      // Find a safe area to tamper with — after the last %%EOF
-      const eofMarker = Buffer.from('%%EOF')
-      const eofPos = tampered.lastIndexOf(eofMarker)
+      // Flip a byte in the document body, well before the signature dictionary,
+      // so it is covered by the first ByteRange segment. Same length → offsets
+      // stay valid; only the signed content changes.
+      const tamperPos = 30
+      tampered[tamperPos] = tampered[tamperPos] ^ 0xff
 
-      if (eofPos > 100) {
-        // Modify bytes before the EOF marker but outside the signature Contents
-        // This is a region that should be covered by the ByteRange
-        const tamperPos = Math.max(10, eofPos - 50)
-        tampered[tamperPos] = tampered[tamperPos] ^ 0xff
-        tampered[tamperPos + 1] = tampered[tamperPos + 1] ^ 0xff
+      const result = await verifyPdf(tampered)
 
-        const result = await verifyPdf(tampered)
+      // The signature structure is still found, but integrity must now fail.
+      expect(result.signatureCount).toBe(1)
+      expect(result.signatures[0].integrityValid).toBe(false)
+      expect(result.valid).toBe(false)
+    })
 
-        // The verifier should still find the signature structure,
-        // but the result may differ depending on where we tampered
-        expect(result.signatureCount).toBeGreaterThanOrEqual(0)
+    it('detects tampering in the trailer region (second ByteRange segment)', async () => {
+      const freshSigned = await signTestPdf(pdfBytes, certPem, signHash)
+      const tampered = Buffer.from(freshSigned)
+
+      const eofPos = tampered.lastIndexOf(Buffer.from('%%EOF'))
+      expect(eofPos).toBeGreaterThan(100)
+      const tamperPos = eofPos - 20
+      tampered[tamperPos] = tampered[tamperPos] ^ 0xff
+
+      const result = await verifyPdf(tampered)
+      expect(result.signatures[0].integrityValid).toBe(false)
+      expect(result.valid).toBe(false)
+    })
+
+    it('rejects a signature whose PKCS#7 signature bytes have been altered', async () => {
+      const freshSigned = await signTestPdf(pdfBytes, certPem, signHash)
+      const result = await verifyPdf(freshSigned)
+      expect(result.signatures[0].integrityValid).toBe(true) // baseline
+
+      // Corrupt a byte inside the signature Contents hex (the PKCS#7 blob).
+      const tampered = Buffer.from(freshSigned)
+      const contentsIdx = tampered.indexOf(Buffer.from('/Contents <'))
+      const hexStart = contentsIdx + '/Contents <'.length
+      // Flip a hex nibble a little way into the DER so the signature no longer verifies.
+      tampered[hexStart + 40] = tampered[hexStart + 40] === 0x61 ? 0x62 : 0x61 // 'a' <-> 'b'
+
+      const altered = await verifyPdf(tampered)
+      if (altered.signatureCount === 1) {
+        expect(altered.signatures[0].integrityValid).toBe(false)
+        expect(altered.valid).toBe(false)
       }
+    })
+  })
+
+  describe('ByteRange coverage (SOC-34)', () => {
+    it('a well-formed signature covers the whole document', async () => {
+      const result = await verifyPdf(signedPdf)
+      expect(result.signatures[0].coversDocument).toBe(true)
+      expect(result.valid).toBe(true)
+    })
+
+    it('rejects bytes appended after signing (incremental-update / append attack)', async () => {
+      const freshSigned = await signTestPdf(pdfBytes, certPem, signHash)
+
+      // Append a forged incremental update after the signed revision. The
+      // original signature's ByteRange no longer reaches EOF, so the appended
+      // bytes are unsigned — the document must not be reported valid.
+      const appended = Buffer.concat([
+        Buffer.from(freshSigned),
+        Buffer.from('\n% forged incremental update — not covered by the signature\n'),
+      ])
+
+      const result = await verifyPdf(appended)
+      expect(result.signatureCount).toBe(1)
+      expect(result.signatures[0].coversDocument).toBe(false)
+      expect(result.valid).toBe(false)
+    })
+
+    it('appended bytes are flagged even though the CMS signature itself is intact', async () => {
+      // The appended bytes are outside the ByteRange, so integrityValid may stay
+      // true — coverage is the check that catches this class of attack.
+      const freshSigned = await signTestPdf(pdfBytes, certPem, signHash)
+      const appended = Buffer.concat([Buffer.from(freshSigned), Buffer.from('EXTRA')])
+
+      const result = await verifyPdf(appended)
+      expect(result.signatures[0].integrityValid).toBe(true)
+      expect(result.signatures[0].coversDocument).toBe(false)
+      expect(result.valid).toBe(false)
     })
   })
 
