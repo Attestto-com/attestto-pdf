@@ -1,10 +1,17 @@
 /**
- * PDF Signer — PAdES digital signatures
+ * PDF Signer — PAdES-B digital signatures
  *
  * Implements:
  * - PAdES-B: CMS/PKCS#7 detached signature embedded in PDF
- * - PAdES-T: Solana anchor as trusted timestamp (via callback)
- * - PAdES-LT: Embed validation data (cert chain, DID snapshot) in DSS
+ *
+ * Out of scope in this release — do not advertise these as supported until they
+ * are built (see SOC-38):
+ * - PAdES-T (trusted timestamp): the optional Solana `anchor` callback records a
+ *   document-hash anchor, but that is distinct from an RFC 3161 signature
+ *   timestamp and is neither embedded nor verified as PAdES-T.
+ * - PAdES-LT (long-term validation): a DSS with the cert chain and a revocation
+ *   snapshot is not produced, so revocation is not captured at signing time;
+ *   verifiers must check revocation out of band.
  *
  * The signer does NOT hold private keys — it receives a signing callback.
  * This allows plugging in P12 certs, PKCS#11 smart cards, or WebAuthn.

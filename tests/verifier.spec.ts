@@ -37,6 +37,53 @@ function generateTestCert(): {
   }
 }
 
+/** Generate a CA certificate and a leaf certificate signed by that CA. */
+function generateCaAndLeaf(): { caPem: string; leafCertPem: string; leafSigner: (b: Buffer) => Promise<Buffer> } {
+  const caKeys = forge.pki.rsa.generateKeyPair(2048)
+  const ca = forge.pki.createCertificate()
+  ca.publicKey = caKeys.publicKey
+  ca.serialNumber = '01'
+  ca.validity.notBefore = new Date()
+  ca.validity.notAfter = new Date()
+  ca.validity.notAfter.setFullYear(ca.validity.notAfter.getFullYear() + 5)
+  const caAttrs: forge.pki.CertificateField[] = [
+    { name: 'commonName', value: 'Attestto Test Root CA' },
+    { name: 'countryName', value: 'CR' },
+  ]
+  ca.setSubject(caAttrs)
+  ca.setIssuer(caAttrs)
+  ca.setExtensions([
+    { name: 'basicConstraints', cA: true },
+    { name: 'keyUsage', keyCertSign: true, cRLSign: true, digitalSignature: true },
+  ])
+  ca.sign(caKeys.privateKey, forge.md.sha256.create())
+
+  const leafKeys = forge.pki.rsa.generateKeyPair(2048)
+  const leaf = forge.pki.createCertificate()
+  leaf.publicKey = leafKeys.publicKey
+  leaf.serialNumber = '1001'
+  leaf.validity.notBefore = new Date()
+  leaf.validity.notAfter = new Date()
+  leaf.validity.notAfter.setFullYear(leaf.validity.notAfter.getFullYear() + 1)
+  leaf.setSubject([
+    { name: 'commonName', value: 'Attestto Test Leaf Signer' },
+    { name: 'countryName', value: 'CR' },
+  ])
+  leaf.setIssuer(caAttrs)
+  leaf.setExtensions([
+    { name: 'basicConstraints', cA: false },
+    { name: 'keyUsage', digitalSignature: true, nonRepudiation: true },
+  ])
+  leaf.sign(caKeys.privateKey, forge.md.sha256.create())
+
+  const leafP12 = createTestP12(leaf, leafKeys.privateKey, 'leafpw')
+  return {
+    caPem: forge.pki.certificateToPem(ca),
+    leafCertPem: forge.pki.certificateToPem(leaf),
+    leafSigner: createP12Signer(leafP12, 'leafpw'),
+  }
+}
+
 /** Create a P12/PFX buffer from a certificate and private key. */
 function createTestP12(
   cert: forge.pki.Certificate,
@@ -266,6 +313,93 @@ describe('verifier', () => {
       expect(result.signatures[0].integrityValid).toBe(true)
       expect(result.signatures[0].coversDocument).toBe(false)
       expect(result.valid).toBe(false)
+    })
+  })
+
+  describe('revocation checking (SOC-38)', () => {
+    it('reports revocationStatus "unknown" and stays valid when no checker is supplied', async () => {
+      const result = await verifyPdf(signedPdf)
+      expect(result.signatures[0].revocationStatus).toBe('unknown')
+      expect(result.valid).toBe(true)
+    })
+
+    it('invalidates the document when the checker reports the cert is revoked', async () => {
+      const result = await verifyPdf(signedPdf, {
+        checkRevocation: async () => 'revoked' as const,
+      })
+      expect(result.signatures[0].revocationStatus).toBe('revoked')
+      expect(result.signatures[0].integrityValid).toBe(true) // crypto still fine…
+      expect(result.valid).toBe(false) // …but a revoked cert is not valid
+    })
+
+    it('stays valid when the checker reports the cert is good', async () => {
+      const result = await verifyPdf(signedPdf, {
+        checkRevocation: async () => 'good' as const,
+      })
+      expect(result.signatures[0].revocationStatus).toBe('good')
+      expect(result.valid).toBe(true)
+    })
+
+    it('passes the signer serial and issuer to the checker', async () => {
+      let seenSerial: string | undefined
+      let seenIssuer: string | undefined
+      await verifyPdf(signedPdf, {
+        checkRevocation: async (q) => {
+          seenSerial = q.serialNumber
+          seenIssuer = q.issuerCN
+          expect(q.signerCertPem).toContain('BEGIN CERTIFICATE')
+          return 'good'
+        },
+      })
+      expect(seenSerial).toBeDefined()
+      expect(seenIssuer).toBe('Attestto Verifier Test')
+    })
+
+    it('treats a throwing checker as "unknown" and does not crash', async () => {
+      const result = await verifyPdf(signedPdf, {
+        checkRevocation: async () => {
+          throw new Error('OCSP responder unreachable')
+        },
+      })
+      expect(result.signatures[0].revocationStatus).toBe('unknown')
+      expect(result.valid).toBe(true)
+    })
+  })
+
+  describe('trust-chain validation (SOC-30)', () => {
+    it('chainStatus is "unchecked" and stays valid when no trust anchors are supplied', async () => {
+      const result = await verifyPdf(signedPdf)
+      expect(result.signatures[0].chainStatus).toBe('unchecked')
+      expect(result.valid).toBe(true)
+    })
+
+    it('marks the signature trusted when its certificate chains to a supplied anchor', async () => {
+      // The test signer cert is self-signed, so it is its own trust anchor.
+      const result = await verifyPdf(signedPdf, { trustAnchors: [certPem] })
+      expect(result.signatures[0].chainStatus).toBe('trusted')
+      expect(result.valid).toBe(true)
+    })
+
+    it('marks the signature untrusted and invalid when it does not chain to the anchor', async () => {
+      const stranger = generateTestCert() // unrelated self-signed cert
+      const result = await verifyPdf(signedPdf, { trustAnchors: [stranger.certPem] })
+      expect(result.signatures[0].chainStatus).toBe('untrusted')
+      expect(result.signatures[0].integrityValid).toBe(true) // crypto still fine…
+      expect(result.valid).toBe(false) // …but the issuer is not trusted
+    })
+
+    it('validates a real CA -> leaf chain against the CA anchor', async () => {
+      const { caPem, leafCertPem, leafSigner } = generateCaAndLeaf()
+      const signed = await signTestPdf(pdfBytes, leafCertPem, leafSigner)
+
+      const trusted = await verifyPdf(signed, { trustAnchors: [caPem] })
+      expect(trusted.signatures[0].chainStatus).toBe('trusted')
+      expect(trusted.valid).toBe(true)
+
+      // Same signed PDF, wrong anchor → untrusted
+      const untrusted = await verifyPdf(signed, { trustAnchors: [generateTestCert().certPem] })
+      expect(untrusted.signatures[0].chainStatus).toBe('untrusted')
+      expect(untrusted.valid).toBe(false)
     })
   })
 

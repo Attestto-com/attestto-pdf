@@ -2,15 +2,65 @@
  * PDF Verifier — Validate existing PDF signatures
  *
  * Checks:
- * - Signature integrity (PKCS#7 matches ByteRange hash)
- * - Certificate validity (expiry, chain)
- * - Document integrity (no modifications after signing)
- * - Signer identity (DID resolution via callback)
+ * - Signature integrity (CMS signature over SignedAttributes + messageDigest)
+ * - Document coverage (ByteRange covers the whole file; no appended bytes)
+ * - Certificate validity window (not-before / not-after)
+ * - Certificate revocation — ONLY when a `checkRevocation` callback is supplied
+ *   (no network I/O by default)
+ *
+ * Certificate chain / trust-anchor validation runs ONLY when `trustAnchors` are
+ * supplied (the library ships no built-in trust store). Without them, trust is
+ * `'unchecked'` and a `valid: true` result means "intact, in-date, fully
+ * covered, and not known-revoked" — NOT "issued by a trusted authority." With
+ * anchors, a signer whose chain does not validate forces the document invalid.
  */
 
 import { PDFDocument } from 'pdf-lib'
 import forge from 'node-forge'
 import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto'
+
+/** Certificate revocation status for a signer certificate. */
+export type RevocationStatus = 'good' | 'revoked' | 'unknown'
+
+/**
+ * Trust-chain status for a signer certificate.
+ * - `'trusted'`   — the chain built to one of the supplied trust anchors.
+ * - `'untrusted'` — anchors were supplied but the chain did not validate.
+ * - `'unchecked'` — no trust anchors were supplied.
+ */
+export type TrustStatus = 'trusted' | 'untrusted' | 'unchecked'
+
+/** Inputs handed to a revocation checker for one signer certificate. */
+export interface RevocationQuery {
+  /** PEM-encoded signer certificate. */
+  signerCertPem: string
+  /** Signer certificate serial number. */
+  serialNumber: string
+  /** Signer certificate issuer common name. */
+  issuerCN: string
+}
+
+export interface VerifyOptions {
+  /**
+   * Optional certificate-revocation checker. The library performs NO network
+   * I/O by default — provide this to check the signer certificate via OCSP
+   * (with CRL fallback) or against embedded/pinned revocation data. Return
+   * `'revoked'` to invalidate the signature, `'good'` to confirm it is not
+   * revoked, or `'unknown'` when the status cannot be determined. A checker
+   * that throws is treated as `'unknown'`.
+   */
+  checkRevocation?: (query: RevocationQuery) => Promise<RevocationStatus>
+
+  /**
+   * PEM-encoded trusted root/intermediate certificates (pinned trust anchors,
+   * e.g. from an `attestto-trust` mirror). When supplied, the signer's chain —
+   * built from the signer cert plus any intermediates embedded in the PKCS#7 —
+   * is validated up to one of these anchors, and the signer's key usage is
+   * checked for document signing. When omitted, trust is not evaluated
+   * (`chainStatus: 'unchecked'`); the library ships no built-in trust store.
+   */
+  trustAnchors?: string[]
+}
 
 export interface SignatureInfo {
   /** Signer common name from certificate */
@@ -40,6 +90,18 @@ export interface SignatureInfo {
    * incremental-update / append modification that the signature does not cover.
    */
   coversDocument: boolean
+  /**
+   * Certificate revocation status. `'unknown'` when no `checkRevocation`
+   * callback was supplied (the library does not fetch OCSP/CRL by default).
+   * A `'revoked'` status forces the signature — and the document — invalid.
+   */
+  revocationStatus: RevocationStatus
+  /**
+   * Trust-chain status. `'unchecked'` when no `trustAnchors` were supplied.
+   * `'untrusted'` (chain did not build to a supplied anchor, or key usage is
+   * wrong) forces the signature — and the document — invalid.
+   */
+  chainStatus: TrustStatus
   /** Raw DER signature bytes */
   signatureBytes: Buffer
 }
@@ -58,7 +120,10 @@ export interface VerifyResult {
 /**
  * Verify all signatures in a PDF document.
  */
-export async function verifyPdf(pdfBytes: Uint8Array | Buffer): Promise<VerifyResult> {
+export async function verifyPdf(
+  pdfBytes: Uint8Array | Buffer,
+  options?: VerifyOptions
+): Promise<VerifyResult> {
   const bytes = pdfBytes instanceof Buffer ? new Uint8Array(pdfBytes) : pdfBytes
   const pdfBuffer = Buffer.from(bytes)
 
@@ -70,7 +135,7 @@ export async function verifyPdf(pdfBytes: Uint8Array | Buffer): Promise<VerifyRe
 
   for (const sig of sigLocations) {
     try {
-      const info = verifySignature(pdfBuffer, sig)
+      const info = await verifySignature(pdfBuffer, sig, options)
       signatures.push(info)
     } catch (err) {
       errors.push(`Signature verification failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -81,12 +146,22 @@ export async function verifyPdf(pdfBytes: Uint8Array | Buffer): Promise<VerifyRe
     signatureCount: signatures.length,
     signatures,
     // A document is valid only if every signature is cryptographically intact,
-    // its certificate is in date, AND it covers the whole file. Requiring every
-    // signature to cover the document (not just one) also blocks the bypass of
-    // appending a fresh full-coverage signature after a partial one.
+    // its certificate is in date, covers the whole file, is not known-revoked,
+    // and — when trust anchors were supplied — chains to a trusted anchor.
+    // Requiring every signature to cover the document (not just one) also blocks
+    // the bypass of appending a fresh full-coverage signature after a partial
+    // one. A 'trusted' or 'unchecked' chain does not block validity; only an
+    // explicit 'untrusted' (anchors supplied, chain failed) does.
     valid:
       signatures.length > 0 &&
-      signatures.every((s) => s.integrityValid && s.certValid && s.coversDocument) &&
+      signatures.every(
+        (s) =>
+          s.integrityValid &&
+          s.certValid &&
+          s.coversDocument &&
+          s.revocationStatus !== 'revoked' &&
+          s.chainStatus !== 'untrusted'
+      ) &&
       errors.length === 0,
     errors,
   }
@@ -160,7 +235,11 @@ function byteRangeCoversDocument(
   )
 }
 
-function verifySignature(pdf: Buffer, sig: SignatureLocation): SignatureInfo {
+async function verifySignature(
+  pdf: Buffer,
+  sig: SignatureLocation,
+  options?: VerifyOptions
+): Promise<SignatureInfo> {
   // Decode the PKCS#7 signature
   const sigDer = Buffer.from(sig.contentsHex, 'hex')
   const asn1 = forge.asn1.fromDer(sigDer.toString('binary'))
@@ -199,6 +278,32 @@ function verifySignature(pdf: Buffer, sig: SignatureLocation): SignatureInfo {
     pdf.length
   )
 
+  // Revocation: the library does no network I/O by default. When a checker is
+  // supplied, consult it; a thrown checker is treated as 'unknown' (fail-safe
+  // to not-known-revoked, surfaced explicitly rather than silently ignored).
+  let revocationStatus: RevocationStatus = 'unknown'
+  if (options?.checkRevocation) {
+    try {
+      revocationStatus = await options.checkRevocation({
+        signerCertPem: forge.pki.certificateToPem(signerCert),
+        serialNumber: signerCert.serialNumber,
+        issuerCN: signerCert.issuer.getField('CN')?.value || 'Unknown',
+      })
+    } catch {
+      revocationStatus = 'unknown'
+    }
+  }
+
+  // Trust chain: only evaluated when the caller pins trust anchors. Build the
+  // chain from the signer cert plus any intermediates embedded in the PKCS#7.
+  let chainStatus: TrustStatus = 'unchecked'
+  if (options?.trustAnchors && options.trustAnchors.length > 0) {
+    const intermediates = (p7.certificates ?? []).slice(1) as forge.pki.Certificate[]
+    chainStatus = validateChain(signerCert, intermediates, options.trustAnchors)
+      ? 'trusted'
+      : 'untrusted'
+  }
+
   // Signing time extraction (from authenticated attributes) — deferred to v0.2
   const signedAt: Date | undefined = undefined
 
@@ -214,7 +319,43 @@ function verifySignature(pdf: Buffer, sig: SignatureLocation): SignatureInfo {
     certValid,
     integrityValid,
     coversDocument,
+    revocationStatus,
+    chainStatus,
     signatureBytes: sigDer,
+  }
+}
+
+/**
+ * Build and validate the signer certificate chain against pinned trust anchors,
+ * and check that the signer's key usage permits document signing.
+ *
+ * Returns true only if the chain builds from the signer cert (plus embedded
+ * intermediates) to one of the trust anchors with valid signatures and dates,
+ * and the leaf's keyUsage (when present) allows digitalSignature/nonRepudiation.
+ * Any parse/verify failure returns false (fail closed).
+ */
+function validateChain(
+  signerCert: forge.pki.Certificate,
+  intermediates: forge.pki.Certificate[],
+  trustAnchorsPem: string[]
+): boolean {
+  try {
+    // Key usage: if the extension is present it must permit signing.
+    const keyUsage = signerCert.getExtension('keyUsage') as
+      | { digitalSignature?: boolean; nonRepudiation?: boolean }
+      | undefined
+    if (keyUsage && !keyUsage.digitalSignature && !keyUsage.nonRepudiation) {
+      return false
+    }
+
+    const anchors = trustAnchorsPem.map((pem) => forge.pki.certificateFromPem(pem))
+    const caStore = forge.pki.createCaStore(anchors)
+    const chain = [signerCert, ...intermediates]
+
+    // Throws on any failure (broken signature, expired, not reaching an anchor).
+    return forge.pki.verifyCertificateChain(caStore, chain) === true
+  } catch {
+    return false
   }
 }
 

@@ -31,4 +31,11 @@ export { signPdf, createP12Signer } from './signer.js'
 export type { SigningIdentity, SignOptions, SignResult } from './signer.js'
 
 export { verifyPdf } from './verifier.js'
-export type { SignatureInfo, VerifyResult } from './verifier.js'
+export type {
+  SignatureInfo,
+  VerifyResult,
+  VerifyOptions,
+  RevocationStatus,
+  RevocationQuery,
+  TrustStatus,
+} from './verifier.js'
