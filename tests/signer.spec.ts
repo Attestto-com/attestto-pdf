@@ -66,7 +66,7 @@ function buildSignOptions(
 ): SignOptions {
   return {
     identity: { certificatePem: certPem },
-    signHash,
+    sign: signHash,
     ...overrides,
   }
 }

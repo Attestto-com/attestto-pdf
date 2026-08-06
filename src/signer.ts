@@ -1,10 +1,17 @@
 /**
- * PDF Signer — PAdES digital signatures
+ * PDF Signer — PAdES-B digital signatures
  *
  * Implements:
  * - PAdES-B: CMS/PKCS#7 detached signature embedded in PDF
- * - PAdES-T: Solana anchor as trusted timestamp (via callback)
- * - PAdES-LT: Embed validation data (cert chain, DID snapshot) in DSS
+ *
+ * Out of scope in this release — do not advertise these as supported until they
+ * are built (see SOC-38):
+ * - PAdES-T (trusted timestamp): the optional Solana `anchor` callback records a
+ *   document-hash anchor, but that is distinct from an RFC 3161 signature
+ *   timestamp and is neither embedded nor verified as PAdES-T.
+ * - PAdES-LT (long-term validation): a DSS with the cert chain and a revocation
+ *   snapshot is not produced, so revocation is not captured at signing time;
+ *   verifiers must check revocation out of band.
  *
  * The signer does NOT hold private keys — it receives a signing callback.
  * This allows plugging in P12 certs, PKCS#11 smart cards, or WebAuthn.
@@ -33,11 +40,16 @@ export interface SignOptions {
   /** Contact info */
   contactInfo?: string
   /**
-   * Callback that signs a hash with the private key.
-   * This is where PKCS#11 / P12 / WebAuthn plugs in.
-   * Receives SHA-256 hash bytes, returns DER-encoded PKCS#7 signature.
+   * Callback that produces the CMS signature. This is where PKCS#11 / P12 /
+   * WebAuthn plugs in.
+   *
+   * Receives the exact bytes covered by the signature (the PDF ByteRange
+   * content) and returns a DER-encoded **detached** PKCS#7/CMS signature whose
+   * `messageDigest` authenticated attribute is `SHA-256(signedBytes)`. Passing
+   * the content (not a bare hash) is required so the signature actually binds
+   * the document — a CMS signer must digest the content itself.
    */
-  signHash: (hash: Buffer) => Promise<Buffer>
+  sign: (signedBytes: Buffer) => Promise<Buffer>
   /**
    * Optional: anchor the signature timestamp on-chain.
    * Receives the document hash, returns a transaction ID or proof.
@@ -59,8 +71,8 @@ export interface SignResult {
  *
  * Flow:
  * 1. Add signature dictionary with ByteRange placeholder
- * 2. Compute hash of the PDF (excluding the signature placeholder)
- * 3. Call signHash() to get PKCS#7/CMS signature
+ * 2. Compute the PDF ByteRange (excluding the signature placeholder)
+ * 3. Call sign() with that content to get the PKCS#7/CMS signature
  * 4. Embed signature into the placeholder
  * 5. Optionally anchor on Solana
  */
@@ -159,15 +171,15 @@ export async function signPdf(
     Buffer.from(padded, 'latin1').copy(pdfBuffer, brMatch.index)
   }
 
-  // Step 3: Hash the parts outside the signature Contents
-  const hashInput = Buffer.concat([
+  // Step 3: Collect the bytes covered by the signature (everything outside the
+  // Contents placeholder). These are what the CMS signature must bind.
+  const signedContent = Buffer.concat([
     pdfBuffer.subarray(byteRange[0], byteRange[0] + byteRange[1]),
     pdfBuffer.subarray(byteRange[2], byteRange[2] + byteRange[3]),
   ])
-  const hash = createHash('sha256').update(hashInput).digest()
 
-  // Step 4: Sign the hash via the callback
-  const pkcs7Signature = await options.signHash(hash)
+  // Step 4: Produce the detached PKCS#7/CMS signature over that content.
+  const pkcs7Signature = await options.sign(signedContent)
 
   // Verify the signature fits in the placeholder
   const sigHex = pkcs7Signature.toString('hex')
@@ -205,13 +217,13 @@ export async function signPdf(
 }
 
 /**
- * Create a PKCS#7/CMS signature from a P12/PFX certificate.
- * Returns a signHash callback for use with signPdf().
+ * Create a PKCS#7/CMS signer from a P12/PFX certificate.
+ * Returns a `sign` callback for use with signPdf().
  */
 export function createP12Signer(
   p12Buffer: Buffer,
   password: string
-): (hash: Buffer) => Promise<Buffer> {
+): (signedBytes: Buffer) => Promise<Buffer> {
   const p12Asn1 = forge.asn1.fromDer(p12Buffer.toString('binary'))
   const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password)
 
@@ -227,10 +239,14 @@ export function createP12Signer(
   if (!certBag?.cert) throw new Error('No certificate found in P12')
   const cert = certBag.cert
 
-  return async (hash: Buffer): Promise<Buffer> => {
-    // Create PKCS#7 signed data
+  return async (signedBytes: Buffer): Promise<Buffer> => {
+    // Create PKCS#7 signed data. Set the actual signed content so forge computes
+    // the messageDigest attribute over it — this is what binds the signature to
+    // the document. `detached: true` keeps the content out of the CMS blob while
+    // still digesting it. (Passing the content via a messageDigest attribute
+    // value does NOT work: forge overrides it with the digest of `p7.content`.)
     const p7 = forge.pkcs7.createSignedData()
-    p7.content = forge.util.createBuffer('')
+    p7.content = forge.util.createBuffer(signedBytes.toString('binary'))
 
     p7.addCertificate(cert)
     p7.addSigner({
@@ -240,7 +256,8 @@ export function createP12Signer(
       authenticatedAttributes: [
         { type: forge.pki.oids.contentType, value: forge.pki.oids.data },
         { type: forge.pki.oids.signingTime, value: new Date().toISOString() },
-        { type: forge.pki.oids.messageDigest, value: hash.toString('binary') },
+        // messageDigest value is computed by forge over p7.content (above).
+        { type: forge.pki.oids.messageDigest },
       ],
     })
 

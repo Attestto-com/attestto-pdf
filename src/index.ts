@@ -15,7 +15,7 @@
  * const signer = createP12Signer(p12Buffer, 'password')
  * const signed = await signPdf(pdfBytes, {
  *   identity: { certificatePem: cert },
- *   signHash: signer,
+ *   sign: signer,
  * })
  *
  * // Verify
@@ -31,4 +31,11 @@ export { signPdf, createP12Signer } from './signer.js'
 export type { SigningIdentity, SignOptions, SignResult } from './signer.js'
 
 export { verifyPdf } from './verifier.js'
-export type { SignatureInfo, VerifyResult } from './verifier.js'
+export type {
+  SignatureInfo,
+  VerifyResult,
+  VerifyOptions,
+  RevocationStatus,
+  RevocationQuery,
+  TrustStatus,
+} from './verifier.js'
