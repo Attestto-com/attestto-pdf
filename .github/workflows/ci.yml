@@ -17,6 +17,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Changelog gate
+        run: node scripts/ci-changelog.mjs
+
       - run: npm ci
 
       # ESLint v9 flat config is not set up in this repo yet — tracked as infra
