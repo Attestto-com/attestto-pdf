@@ -17,7 +17,7 @@
  * This allows plugging in P12 certs, PKCS#11 smart cards, or WebAuthn.
  */
 
-import { PDFDocument, PDFHexString, PDFName, PDFArray, PDFDict, PDFString, PDFNumber } from 'pdf-lib'
+import { PDFDocument, PDFHexString, PDFName, PDFArray, PDFString, PDFNumber } from 'pdf-lib'
 import forge from 'node-forge'
 import { createHash } from 'node:crypto'
 

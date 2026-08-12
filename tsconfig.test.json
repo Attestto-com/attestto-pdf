@@ -1,0 +1,14 @@
+{
+  // Type-checks the tests, which tsconfig.json excludes.
+  //
+  // Without this pass a type error inside a spec is invisible: `typecheck` only
+  // ever saw src/, so a spec could assert against a shape the code does not
+  // have and still be reported green. gate-self-test asserts that this file
+  // exists for exactly that reason.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src", "tests"]
+}

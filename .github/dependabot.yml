@@ -1,0 +1,27 @@
+# Dependabot configuration, grouped so pull requests stay reviewable.
+#
+# This repo had no dependabot.yml at all. Security ALERTS are on by default and
+# need no config, so 16 of them accumulated while nothing was ever opened to fix
+# them: alerts are the detection half, this file is the remediation half, and
+# only the first was switched on. Third repo in this estate with that gap.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # Batched by intent, so a routine toolchain bump is one review rather
+      # than six, and a major shows up on its own where it can be read.
+      development-dependencies:
+        dependency-type: "development"
+        update-types: ["minor", "patch"]
+      production-dependencies:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

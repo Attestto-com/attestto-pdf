@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest'
-import { verifyPdf } from '../src/verifier.js'
+import { verifyPdf, trimContentsPadding } from '../src/verifier.js'
 import { signPdf, createP12Signer } from '../src/signer.js'
 import type { SignOptions } from '../src/signer.js'
 import { PDFDocument } from 'pdf-lib'
@@ -400,6 +400,47 @@ describe('verifier', () => {
       const untrusted = await verifyPdf(signed, { trustAnchors: [generateTestCert().certPem] })
       expect(untrusted.signatures[0].chainStatus).toBe('untrusted')
       expect(untrusted.valid).toBe(false)
+    })
+  })
+
+  /**
+   * These are deliberately deterministic. The defect they cover reached us as a
+   * 1-in-8 flake across the whole suite, and a flaky control is not a control:
+   * the next real regression gets re-run away as "the known flake". The
+   * condition is "the CMS ends on a zero nibble", so it can just be stated.
+   */
+  describe('/Contents padding is cut by DER length, not by trailing zeros', () => {
+    // 30 04 | 01 02 03 00  =  SEQUENCE, length 4, content ending in a zero byte.
+    const derEndingInZero = '300401020300'
+    const pad = (hex: string, window = 64) => hex.padEnd(window, '0')
+
+    it('keeps a signature byte that happens to be zero', () => {
+      const kept = trimContentsPadding(pad(derEndingInZero))
+      expect(kept).toBe(derEndingInZero)
+      // The old implementation, for contrast: it eats the final 0x00 and
+      // returns 5 bytes where the header declares 6.
+      expect(pad(derEndingInZero).replace(/0+$/, '')).toBe('3004010203')
+    })
+
+    it('never returns an odd number of hex characters', () => {
+      // An odd length is the signature of the bug: half a byte was removed.
+      for (const body of ['00', '0000', '1000', '0010']) {
+        const der = `3002${body}`.slice(0, 4) + body
+        expect(trimContentsPadding(pad(der)).length % 2).toBe(0)
+      }
+    })
+
+    it('reads the long-form length used by a real 2048-bit RSA CMS', () => {
+      // 30 82 01 F4 = SEQUENCE, long form, 2 length bytes, 500 content bytes.
+      const content = '00'.repeat(500)
+      const der = '308201f4' + content
+      expect(trimContentsPadding(pad(der, 16384))).toBe(der)
+    })
+
+    it('falls back to the old trim when the header is unreadable', () => {
+      // Not a valid DER header: nothing better is available, so it degrades
+      // rather than throwing inside signature discovery.
+      expect(trimContentsPadding('30ff' + '00'.repeat(4))).toBe('30ff')
     })
   })
 
