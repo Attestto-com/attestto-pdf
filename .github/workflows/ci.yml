@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The changelog gate needs a merge base with the target branch, and
           # the default depth-1 checkout does not have one.
