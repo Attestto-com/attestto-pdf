@@ -4,6 +4,14 @@ All notable changes to `@attestto/pdf` will be documented in this file.
 
 This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **16 open Dependabot advisories closed, one of them critical.** `vitest` below 3.2.6 exposes an arbitrary file read while its UI server is listening (critical). The other 15 are transitive dependencies of the test toolchain: `brace-expansion` (3 DoS advisories), `js-yaml` (3 quadratic-CPU advisories), `nanoid` (2 infinite-loop advisories), `postcss` (4, including arbitrary file read through source-map auto-loading), `vite` (2), and `esbuild` (1).
+- `vitest` moves from `^3.0.0` to `^3.2.6`. The old range already permitted the patched release: **the lockfile was pinning 3.2.4**, so no range change was ever needed and no dependency bot could have fixed it by widening one.
+- The 6 transitive packages are held by bounded `overrides`, each floor set to the advisory's first patched version and each capped to its own major line. An open-ended floor adopts the next major silently, which is how a `js-yaml` floor elsewhere in this estate pulled in 5.x while still satisfying the advisory.
+- All resolved versions verified individually against their advisory floor, not inferred from `npm audit` reporting zero. 53 tests pass and the build is clean.
+
 ## [0.2.0] - 2026-07-19
 
 Security release. The verifier previously reported a hard-coded integrity result, trusted the signature `ByteRange` as-parsed, accepted any unexpired certificate as trusted, and never checked revocation — so a tampered, appended, impersonated, or revoked-certificate document could verify as valid. Verification is now real and fail-closed across all four axes.
