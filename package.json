@@ -80,7 +80,7 @@
     "@types/node": "^25.5.2",
     "@types/node-forge": "^1.3.14",
     "eslint": "^10.8.1",
-    "pdfjs-dist": "^4.10.38",
+    "pdfjs-dist": "^6.2.108",
     "tsup": "^8.0.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.67.0",
